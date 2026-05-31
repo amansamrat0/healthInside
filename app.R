@@ -17,20 +17,58 @@ raw_data <- read.csv("framingham.csv", stringsAsFactors = FALSE, na.strings = c(
 # Convert all columns to appropriate types for analysis
 data <- raw_data
 
-# --- Build Logistic Regression Model (complete cases only) ---
+model_features <- c("age", "male", "sysBP", "totChol", "glucose", "BMI", "cigsPerDay", "diabetes", "prevalentStroke", "prevalentHyp")
 model_data <- data %>%
-  dplyr::select(age, sysBP, diaBP, BMI, glucose, diabetes, currentSmoker, TenYearCHD) %>%
+  dplyr::select(all_of(c(model_features, "TenYearCHD"))) %>%
   na.omit()
 
+continuous_vars <- c("sysBP", "totChol", "glucose", "BMI")
+for(v in continuous_vars) {
+  limit <- quantile(model_data[[v]], 0.99, na.rm = TRUE)
+  model_data <- model_data[model_data[[v]] <= limit, ]
+}
+
+counts_orig <- table(model_data$TenYearCHD)
+weights_orig <- ifelse(model_data$TenYearCHD == 1, 
+                       (nrow(model_data) / counts_orig["1"]), 
+                       (nrow(model_data) / counts_orig["0"]))
+
+set.seed(42)
+train_idx <- sample(1:nrow(model_data), 0.8 * nrow(model_data))
+train_data <- model_data[train_idx, ]
+test_data <- model_data[-train_idx, ]
+
 logistic_model <- glm(
-  TenYearCHD ~ age + sysBP + diaBP + BMI + glucose + diabetes + currentSmoker,
-  data = model_data,
+  TenYearCHD ~ age + male + sysBP + totChol + glucose + BMI + cigsPerDay + diabetes + prevalentStroke + prevalentHyp,
+  data = train_data,
+  weights = weights_orig[train_idx],
   family = "binomial"
 )
 
+predicted_probs_test <- predict(logistic_model, newdata = test_data, type = "response")
+predicted_classes_test <- ifelse(predicted_probs_test > 0.5, 1, 0)
+actual_classes_test <- test_data$TenYearCHD
+
+tn <- sum(actual_classes_test == 0 & predicted_classes_test == 0)
+fp <- sum(actual_classes_test == 0 & predicted_classes_test == 1)
+fn <- sum(actual_classes_test == 1 & predicted_classes_test == 0)
+tp <- sum(actual_classes_test == 1 & predicted_classes_test == 1)
+
+accuracy <- (tp + tn) / (tp + tn + fp + fn)
+sensitivity <- tp / (tp + fn)
+specificity <- tn / (tn + fp)
+
+
+
+
+
+
+
 # --- Prepare K-Means Clustering Data ---
-cluster_vars <- c("age", "sysBP", "diaBP", "BMI", "glucose", "diabetes", "currentSmoker")
+cluster_vars <- c("age", "male", "sysBP", "totChol", "glucose", "BMI", "cigsPerDay", "diabetes", "prevalentStroke", "prevalentHyp")
 cluster_data <- model_data[, cluster_vars]
+
+
 cluster_scaled <- scale(cluster_data)
 
 set.seed(123)
@@ -206,27 +244,49 @@ ui <- fluidPage(
           4,
           wellPanel(
             h4("Patient Information"),
+            selectInput("input_male", "Gender:", choices = c("Male" = 1, "Female" = 0)),
             numericInput("input_age", "Age (years):", value = 50, min = 20, max = 90),
+            numericInput("input_totchol", "Total Cholesterol (mg/dL):", value = 200, min = 100, max = 600),
             numericInput("input_sysbp", "Systolic Blood Pressure (mmHg):", value = 120, min = 80, max = 250),
-            numericInput("input_diabp", "Diastolic Blood Pressure (mmHg):", value = 80, min = 50, max = 150),
             numericInput("input_bmi", "BMI:", value = 25, min = 15, max = 50, step = 0.1),
             numericInput("input_glucose", "Glucose (mg/dL):", value = 85, min = 40, max = 400),
+            numericInput("input_cigs", "Cigarettes Per Day:", value = 0, min = 0, max = 100),
             selectInput("input_diabetes", "Diabetes:", choices = c("No" = 0, "Yes" = 1)),
-            selectInput("input_smoker", "Current Smoker:", choices = c("No" = 0, "Yes" = 1)),
+            selectInput("input_stroke", "Prevalent Stroke:", choices = c("No" = 0, "Yes" = 1)),
+            selectInput("input_hyp", "Prevalent Hypertension:", choices = c("No" = 0, "Yes" = 1)),
+
             br(),
             actionButton("predict_risk", "Predict Risk", class = "btn-danger btn-lg", width = "100%")
+
           )
         ),
         column(
           8,
           wellPanel(
-            h4("Prediction Results"),
+            h4("Risk Prediction Result"),
             uiOutput("prediction_result"),
             br(),
-            h4("Model Information"),
-            p("Model: Logistic Regression"),
-            p("Formula: TenYearCHD ~ age + sysBP + diaBP + BMI + glucose + diabetes + currentSmoker"),
-            verbatimTextOutput("model_summary_brief")
+            h4("Analysis Metadata"),
+            p("Regression Baseline: TenYearCHD ~ age + male + sysBP + totChol + glucose + BMI + cigsPerDay + diabetes + prevalentStroke + prevalentHyp"),
+            actionButton("toggle_summary", "View Detailed Statistics", class = "btn-info btn-xs"),
+            conditionalPanel(
+              condition = "input.toggle_summary % 2 == 1",
+              br(),
+              h5("Statistical Model Summary"),
+              verbatimTextOutput("model_full_summary")
+            ),
+            br(),
+            h4("Model Validation Details"),
+            p("The following metrics are derived from an 80/20 train-test validation on unseen cases."),
+            tableOutput("performance_metrics"),
+            br(),
+            h4("Outcome Distribution (Hold-out Set)"),
+            tableOutput("confusion_matrix_table")
+
+
+
+
+
           )
         )
       ),
@@ -325,32 +385,38 @@ server <- function(input, output, session) {
     max_val <- max(values, na.rm = TRUE)
 
     spread_text <- if (sd_val < (0.1 * mean_val)) {
-      "The values are relatively consistent with low variation."
+      "The sample distribution is relatively concentrated."
     } else if (sd_val > (0.3 * mean_val)) {
-      "The values show high variation across patients."
+      "There is significant variation across patients in this metric."
     } else {
-      "The values show moderate variation across patients."
+      "The sample shows moderate clinical variation."
     }
 
     range_text <- paste0(
       "Values range from ", round(min_val, 2), " to ", round(max_val, 2),
-      " with a mean of ", round(mean_val, 2), "."
+      " with an average of ", round(mean_val, 2), "."
     )
 
     col_context <- switch(
       col_name,
-      age = "Higher age is generally associated with increased cardiovascular risk.",
-      sysBP = "Systolic blood pressure is a key indicator of hypertension and heart disease risk.",
-      diaBP = "Diastolic blood pressure reflects vascular resistance and cardiovascular health.",
-      BMI = "BMI indicates body weight status; higher values may increase heart disease risk.",
-      glucose = "Blood glucose levels are important for assessing diabetes-related heart risk.",
-      diabetes = "Diabetes status is a significant predictor of coronary heart disease.",
-      currentSmoker = "Smoking status strongly influences long-term cardiovascular outcomes.",
-      TenYearCHD = "This is the target variable indicating 10-year CHD risk (0 = No, 1 = Yes).",
-      paste("This variable provides useful insight into patient health characteristics.")
+      age = "Advanced age is a well-documented risk factor in cardiovascular health studies.",
+      male = "Physiological differences contribute to different risk patterns for males in this population.",
+      sysBP = "Systolic blood pressure is a primary indicator of vascular stress and hypertension.",
+      totChol = "Total cholesterol levels often serve as a gauge for atherosclerosis risk.",
+      BMI = "BMI provides an estimate of body weight status; higher values linked to heart strain.",
+      glucose = "Managing blood glucose is essential for reducing diabetes-related cardiac complications.",
+      diabetes = "A diagnosis of diabetes significantly influences long-term cardiovascular outcomes.",
+      cigsPerDay = "The frequency of smoking directly impacts the extent of physiological strain on the heart.",
+      prevalentStroke = "A clinical history of stroke indicates a very high baseline risk for future cardiac events.",
+      prevalentHyp = "Chronic hypertension shows long-term damage and elevations in risk levels.",
+      TenYearCHD = "This field indicates whether CHD was observed in the 10-year follow-up period.",
+      paste("This variable provides specific context regarding patient health status.")
     )
 
+
+
     paste(range_text, spread_text, col_context)
+
   }
 
   # ===========================================================================
@@ -563,13 +629,18 @@ server <- function(input, output, session) {
   prediction_result <- eventReactive(input$predict_risk, {
     new_patient <- data.frame(
       age = input$input_age,
+      male = as.numeric(input$input_male),
       sysBP = input$input_sysbp,
-      diaBP = input$input_diabp,
+      totChol = input$input_totchol,
       BMI = input$input_bmi,
       glucose = input$input_glucose,
+      cigsPerDay = input$input_cigs,
       diabetes = as.numeric(input$input_diabetes),
-      currentSmoker = as.numeric(input$input_smoker)
+      prevalentStroke = as.numeric(input$input_stroke),
+      prevalentHyp = as.numeric(input$input_hyp)
     )
+
+
 
     probability <- predict(logistic_model, newdata = new_patient, type = "response")
     risk_info <- get_risk_category(probability)
@@ -603,80 +674,106 @@ server <- function(input, output, session) {
     )
   })
 
-  output$model_summary_brief <- renderPrint({
-    cat("Model trained on", nrow(model_data), "complete records.\n")
-    cat("AIC:", round(AIC(logistic_model), 2), "\n")
+  output$model_full_summary <- renderPrint({
+    summary(logistic_model)
   })
 
-  # --- Risk Factor Analysis Table and Plot ---
-  risk_factors_df <- reactive({
-    coefs <- coef(logistic_model)[-1]
-    abs_coefs <- abs(coefs)
-
-    bp_importance <- max(abs_coefs["sysBP"], abs_coefs["diaBP"], na.rm = TRUE)
-    bp_direction <- ifelse(
-      abs_coefs["sysBP"] >= abs_coefs["diaBP"],
-      coefs["sysBP"],
-      coefs["diaBP"]
+  output$performance_metrics <- renderTable({
+    data.frame(
+      Metric = c("Overall Accuracy", "Detection Rate (Sensitivity)", "Identification Rate (Specificity)"),
+      Result = c(
+        paste0(round(accuracy * 100, 2), "%"),
+        paste0(round(sensitivity * 100, 2), "%"),
+        paste0(round(specificity * 100, 2), "%")
+      ),
+      Context = c(
+        "Correct predictions across the test sample.",
+        "Ability to correctly identify high-risk cases.",
+        "Ability to correctly identify healthy cases."
+      )
     )
+  }, striped = TRUE, bordered = TRUE)
+
+  output$confusion_matrix_table <- renderTable({
+    data.frame(
+      Indicator = c("True Negatives (TN)", "False Positives (FP)", "False Negatives (FN)", "True Positives (TP)"),
+      Count = c(tn, fp, fn, tp),
+      Definition = c(
+        "Cases correctly identified as Healthy.",
+        "Healthy cases misidentified as At-Risk.",
+        "At-Risk cases misidentified as Healthy.",
+        "Cases correctly identified as At-Risk."
+      )
+    )
+  }, striped = TRUE, bordered = TRUE)
+
+
+
+
+
+  # --- Risk Factor Analysis Table and Plot (Using Standardized Coefficients) ---
+  risk_factors_df <- reactive({
+    # Get raw coefficients
+    coefs <- coef(logistic_model)[-1]
+    
+    # Calculate Standard Deviations for every predictor in the model data
+    sds <- sapply(model_data[names(coefs)], sd, na.rm = TRUE)
+    
+    # Standardize coefficients: Beta_std = Beta_raw * (SD_x)
+    # This places all variables on the same scale (effect per 1 standard deviation)
+    std_coefs <- coefs * sds
+    abs_std_coefs <- abs(std_coefs)
 
     factors <- data.frame(
+      Variable = names(coefs),
       Risk_Factor = c(
         "Age",
-        "Blood Pressure",
+        "Gender (Male)",
+        "Systolic BP",
+        "Total Cholesterol",
         "Glucose",
+        "BMI",
+        "Cigarettes Per Day",
         "Diabetes",
-        "Smoking Status"
+        "Prevalent Stroke",
+        "Prevalent Hyp"
       ),
-      Coefficient = c(
-        coefs["age"],
-        bp_direction,
-        coefs["glucose"],
-        coefs["diabetes"],
-        coefs["currentSmoker"]
-      ),
-      Importance = c(
-        abs_coefs["age"],
-        bp_importance,
-        abs_coefs["glucose"],
-        abs_coefs["diabetes"],
-        abs_coefs["currentSmoker"]
-      ),
-      Direction = c(
-        ifelse(coefs["age"] > 0, "Increases Risk", "Decreases Risk"),
-        ifelse(bp_direction > 0, "Increases Risk", "Decreases Risk"),
-        ifelse(coefs["glucose"] > 0, "Increases Risk", "Decreases Risk"),
-        ifelse(coefs["diabetes"] > 0, "Increases Risk", "Decreases Risk"),
-        ifelse(coefs["currentSmoker"] > 0, "Increases Risk", "Decreases Risk")
-      ),
+
+
+      Raw_Coefficient = coefs,
+      Importance = abs_std_coefs,
+      Direction = ifelse(coefs > 0, "Increases Risk", "Decreases Risk"),
       stringsAsFactors = FALSE
     )
 
     factors <- factors[order(-factors$Importance), ]
     factors$Rank <- seq_len(nrow(factors))
-    factors[, c("Coefficient", "Importance")] <- round(factors[, c("Coefficient", "Importance")], 4)
+    factors[, c("Raw_Coefficient", "Importance")] <- round(factors[, c("Raw_Coefficient", "Importance")], 4)
     factors
   })
 
   output$risk_factors_table <- renderTable({
-    risk_factors_df()[, c("Rank", "Risk_Factor", "Coefficient", "Importance", "Direction")]
+    risk_factors_df()[, c("Rank", "Risk_Factor", "Importance", "Direction")]
   }, striped = TRUE, bordered = TRUE)
 
   output$risk_factors_plot <- renderPlot({
     factors <- risk_factors_df()
     factors$Risk_Factor <- factor(factors$Risk_Factor, levels = rev(factors$Risk_Factor))
 
-    ggplot(factors, aes(x = Risk_Factor, y = Importance, fill = Risk_Factor)) +
+    ggplot(factors, aes(x = Risk_Factor, y = Importance, fill = Importance)) +
       geom_bar(stat = "identity", show.legend = FALSE) +
       coord_flip() +
-      scale_fill_brewer(palette = "Blues") +
+      scale_fill_gradient(low = "#d0e1f9", high = "#1e3d59") +
       labs(
-        title = "Top Risk Factors by Importance",
+        title = "Influence Ranking - Standardized Scale",
+        subtitle = "Predictor impact measured per one standard deviation of change",
         x = "Risk Factor",
-        y = "Absolute Coefficient Value"
+        y = "Relative Weight (Significance)"
       ) +
       theme_minimal(base_size = 14)
   })
+
+
 
   # --- Clustering Analysis Outputs ---
   cluster_plot_data <- reactive({
@@ -731,34 +828,56 @@ server <- function(input, output, session) {
     coefs <- coef(logistic_model)
 
     age_effect <- ifelse(coefs["age"] > 0,
-                         "Higher age increases heart disease risk.",
-                         "Age shows an inverse relationship with predicted risk in this model.")
-    bp_effect <- ifelse(max(coefs["sysBP"], coefs["diaBP"], na.rm = TRUE) > 0,
-                        "High blood pressure is a major risk factor.",
-                        "Blood pressure shows protective association in this sample.")
+                         "Patient age is a primary driver of observed risk in this model.",
+                         "In this specific subset, chronological age showed a lower relative impact.")
+    bp_effect <- ifelse(coefs["sysBP"] > 0,
+                        "Elevated systolic blood pressure is strongly associated with adverse outcomes.",
+                        "Blood pressure readings remained within relatively safe predictive bounds.")
+    chol_effect <- ifelse(coefs["totChol"] > 0,
+                         "Baseline cholesterol levels contribute significantly to overall risk.",
+                         "Cholesterol variation showed limited predictive weight in this instance.")
+    gender_effect <- ifelse(coefs["male"] > 0,
+                           "Male gender is a statistically significant indicator in this population.",
+                           "Gender-based variation was less pronounced in this sample.")
     diabetes_effect <- ifelse(coefs["diabetes"] > 0,
-                              "Diabetes significantly affects prediction.",
-                              "Diabetes status shows limited positive association in this model.")
-    smoking_effect <- ifelse(coefs["currentSmoker"] > 0,
-                             "Smokers have higher risk than non-smokers.",
-                             "Smoking status did not show a strong positive effect in this model.")
+                              "Diabetes status is a key factor in long-term risk assessment.",
+                              "The influence of diabetes was minimal in this specific projection.")
+    smoking_effect <- ifelse(coefs["cigsPerDay"] > 0,
+                             "Daily smoking intensity is linked to increased cardiovascular strain.",
+                             "Smoking frequency did not emerge as a primary risk driver here.")
+    stroke_effect <- ifelse(coefs["prevalentStroke"] > 0,
+                           "A clinical history of stroke indicates a very high vulnerability.",
+                           "Lack of prior stroke history significantly shifts the risk baseline.")
+    hyp_effect <- ifelse(coefs["prevalentHyp"] > 0,
+                        "Chronic hypertension is a major contributor to the calculated risk.",
+                        "Hypertension history showed a secondary impact on the final result.")
+
+
 
     chd_rate <- round(mean(model_data$TenYearCHD, na.rm = TRUE) * 100, 1)
-    smoker_rate <- round(mean(model_data$TenYearCHD[model_data$currentSmoker == 1], na.rm = TRUE) * 100, 1)
-    nonsmoker_rate <- round(mean(model_data$TenYearCHD[model_data$currentSmoker == 0], na.rm = TRUE) * 100, 1)
+    heavy_smoker_count <- sum(model_data$cigsPerDay >= 20, na.rm = TRUE)
+    heavy_smoker_rate <- round(mean(model_data$TenYearCHD[model_data$cigsPerDay >= 20], na.rm = TRUE) * 100, 1)
+
 
     tagList(
       tags$ul(
         tags$li(age_effect),
         tags$li(bp_effect),
+        tags$li(chol_effect),
+        tags$li(gender_effect),
         tags$li(diabetes_effect),
         tags$li(smoking_effect),
-        tags$li("Lifestyle modifications can reduce future cardiovascular risk."),
+        tags$li(stroke_effect),
+        tags$li(hyp_effect),
+        tags$li("Lifestyle modifications (diet, exercise) can reduce future cardiovascular risk."),
         tags$li(paste0("Overall 10-year CHD rate in the dataset: ", chd_rate, "%.")),
-        tags$li(paste0("CHD rate among smokers: ", smoker_rate, "% vs non-smokers: ", nonsmoker_rate, "%.")),
+        tags$li(paste0(heavy_smoker_count, " heavy smokers (20+ cigs/day) have a risk rate of ", heavy_smoker_rate, "%.")),
         tags$li(paste0("Most influential risk factor in the model: ", top_factor, "."))
+
       )
     )
+
+
   })
 }
 
