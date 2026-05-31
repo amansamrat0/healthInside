@@ -191,10 +191,16 @@ ui <- fluidPage(
             h4("Graph Settings"),
             selectInput(
               "selected_column",
-              "Select Column:",
-              choices = names(data),
+              "Select Indicator Groups:",
+              choices = list(
+                Demographics = c("Age" = "age", "Gender" = "male"),
+                Lifestyle = c("Cigarettes Per Day" = "cigsPerDay", "BMI" = "BMI"),
+                `Vital Signs` = c("Systolic BP" = "sysBP", "Total Cholesterol" = "totChol", "Glucose" = "glucose"),
+                `Medical History` = c("Diabetes" = "diabetes", "Prevalent Stroke" = "prevalentStroke", "Prevalent Hyp" = "prevalentHyp")
+              ),
               selected = "age"
             ),
+
             selectInput(
               "graph_type",
               "Select Graph Type:",
@@ -207,7 +213,9 @@ ui <- fluidPage(
               ),
               selected = "histogram"
             ),
+            checkboxInput("compare_risk", "Compare with Heart Risk (TenYearCHD)", value = FALSE),
             actionButton("generate_graph", "Generate Graph", class = "btn-primary")
+
           )
         ),
         column(
@@ -262,11 +270,10 @@ ui <- fluidPage(
         ),
         column(
           8,
+          uiOutput("prediction_display_panel"),
           wellPanel(
-            h4("Risk Prediction Result"),
-            uiOutput("prediction_result"),
-            br(),
             h4("Analysis Metadata"),
+
             p("Regression Baseline: TenYearCHD ~ age + male + sysBP + totChol + glucose + BMI + cigsPerDay + diabetes + prevalentStroke + prevalentHyp"),
             actionButton("toggle_summary", "View Detailed Statistics", class = "btn-info btn-xs"),
             conditionalPanel(
@@ -446,8 +453,7 @@ server <- function(input, output, session) {
 
   viz_data <- eventReactive(input$generate_graph, {
     col_name <- input$selected_column
-    values <- data[[col_name]]
-    list(col_name = col_name, values = values)
+    list(col_name = col_name, plot_df = data.frame(value = data[[col_name]], TenYearCHD = factor(data$TenYearCHD)))
   }, ignoreNULL = FALSE)
 
   output$main_plot <- renderPlot({
@@ -455,8 +461,7 @@ server <- function(input, output, session) {
 
     viz <- viz_data()
     col_name <- viz$col_name
-    values <- viz$values
-    plot_df <- data.frame(value = values)
+    plot_df <- viz$plot_df
     plot_df <- plot_df[!is.na(plot_df$value), , drop = FALSE]
 
     if (nrow(plot_df) == 0) {
@@ -468,10 +473,11 @@ server <- function(input, output, session) {
     p <- switch(
       input$graph_type,
       histogram = {
-        if (!is.numeric(plot_df$value)) {
-          ggplot(plot_df, aes(x = factor(value))) +
-            geom_bar(fill = "#3498db", color = "white") +
-            labs(title = paste("Bar Chart of", col_name), x = col_name, y = "Count") +
+        if (input$compare_risk) {
+          ggplot(plot_df, aes(x = value, fill = TenYearCHD)) +
+            geom_histogram(bins = 30, alpha = 0.6, position = "identity") +
+            scale_fill_manual(values = c("0" = "#4DBBD5FF", "1" = "#E64B35FF"), name = "Heart Risk", labels = c("No", "Yes")) +
+            labs(title = paste(col_name, "Distribution vs Risk Status"), x = col_name, y = "Frequency") +
             theme_minimal(base_size = 14)
         } else {
           ggplot(plot_df, aes(x = value)) +
@@ -481,51 +487,80 @@ server <- function(input, output, session) {
         }
       },
       boxplot = {
-        ggplot(plot_df, aes(y = if (is.numeric(plot_df$value)) value else factor(value))) +
-          geom_boxplot(fill = "#2ecc71", alpha = 0.7) +
-          labs(title = paste("Box Plot of", col_name), y = col_name) +
-          theme_minimal(base_size = 14)
-      },
-      barchart = {
-        if (is.numeric(plot_df$value) && length(unique(plot_df$value)) > 15) {
-          ggplot(plot_df, aes(x = value)) +
-            geom_histogram(bins = 20, fill = "#9b59b6", color = "white") +
-            labs(title = paste("Bar Chart (Binned) of", col_name), x = col_name, y = "Count") +
+        if (input$compare_risk) {
+          ggplot(plot_df, aes(x = TenYearCHD, y = if (is.numeric(value)) value else as.numeric(factor(value)), fill = TenYearCHD)) +
+            geom_boxplot(alpha = 0.7) +
+            scale_fill_manual(values = c("0" = "#4DBBD5FF", "1" = "#E64B35FF"), name = "Heart Risk", labels = c("No", "Yes")) +
+            labs(title = paste(col_name, "by Risk Status"), x = "Heart Risk Status", y = col_name) +
             theme_minimal(base_size = 14)
         } else {
-          count_df <- as.data.frame(table(plot_df$value))
-          names(count_df) <- c("category", "count")
-          ggplot(count_df, aes(x = category, y = count)) +
-            geom_bar(stat = "identity", fill = "#9b59b6", color = "white") +
-            labs(title = paste("Bar Chart of", col_name), x = col_name, y = "Count") +
+          ggplot(plot_df, aes(y = if (is.numeric(plot_df$value)) value else factor(value))) +
+            geom_boxplot(fill = "#2ecc71", alpha = 0.7) +
+            labs(title = paste("Box Plot of", col_name), y = col_name) +
             theme_minimal(base_size = 14)
+        }
+      },
+      barchart = {
+        if (input$compare_risk) {
+          ggplot(plot_df, aes(x = value, fill = TenYearCHD)) +
+            geom_bar(position = "dodge", alpha = 0.8) +
+            scale_fill_manual(values = c("0" = "#4DBBD5FF", "1" = "#E64B35FF"), name = "Heart Risk", labels = c("No", "Yes")) +
+            labs(title = paste(col_name, "Frequency by Risk"), x = col_name, y = "Count") +
+            theme_minimal(base_size = 14)
+        } else {
+          if (is.numeric(plot_df$value) && length(unique(plot_df$value)) > 15) {
+            ggplot(plot_df, aes(x = value)) +
+              geom_histogram(bins = 20, fill = "#9b59b6", color = "white") +
+              labs(title = paste("Bar Chart (Binned) of", col_name), x = col_name, y = "Count") +
+              theme_minimal(base_size = 14)
+          } else {
+            count_df <- as.data.frame(table(plot_df$value))
+            names(count_df) <- c("category", "count")
+            ggplot(count_df, aes(x = category, y = count)) +
+              geom_bar(stat = "identity", fill = "#9b59b6", color = "white") +
+              labs(title = paste("Bar Chart of", col_name), x = col_name, y = "Count") +
+              theme_minimal(base_size = 14)
+          }
         }
       },
       scatter = {
         plot_df$index <- seq_len(nrow(plot_df))
-        ggplot(plot_df, aes(x = index, y = if (is.numeric(value)) value else as.numeric(factor(value)))) +
-          geom_point(color = "#e67e22", alpha = 0.6) +
-          labs(
-            title = paste("Scatter Plot of", col_name),
-            x = "Observation Index",
-            y = col_name
-          ) +
-          theme_minimal(base_size = 14)
-      },
-      density = {
-        if (!is.numeric(plot_df$value)) {
-          ggplot(plot_df, aes(x = factor(value))) +
-            geom_bar(fill = "#1abc9c", color = "white") +
-            labs(title = paste("Distribution of", col_name), x = col_name, y = "Count") +
+        if (input$compare_risk) {
+          ggplot(plot_df, aes(x = index, y = if (is.numeric(value)) value else as.numeric(factor(value)), color = TenYearCHD)) +
+            geom_point(alpha = 0.5, size = 2) +
+            scale_color_manual(values = c("0" = "#4DBBD5FF", "1" = "#E64B35FF"), name = "Heart Risk", labels = c("No", "Yes")) +
+            labs(title = paste(col_name, "Trend vs Risk"), x = "Observation Index", y = col_name) +
             theme_minimal(base_size = 14)
         } else {
-          ggplot(plot_df, aes(x = value)) +
-            geom_density(fill = "#1abc9c", alpha = 0.5, color = "#16a085") +
-            labs(title = paste("Density Plot of", col_name), x = col_name, y = "Density") +
+          ggplot(plot_df, aes(x = index, y = if (is.numeric(value)) value else as.numeric(factor(value)))) +
+            geom_point(color = "#e67e22", alpha = 0.6) +
+            labs(title = paste("Scatter Plot of", col_name), x = "Observation Index", y = col_name) +
             theme_minimal(base_size = 14)
+        }
+      },
+      density = {
+        if (input$compare_risk) {
+          ggplot(plot_df, aes(x = if (is.numeric(value)) value else as.numeric(factor(value)), fill = TenYearCHD)) +
+            geom_density(alpha = 0.5) +
+            scale_fill_manual(values = c("0" = "#4DBBD5FF", "1" = "#E64B35FF"), name = "Heart Risk", labels = c("No", "Yes")) +
+            labs(title = paste(col_name, "Density by Risk Status"), x = col_name, y = "Density") +
+            theme_minimal(base_size = 14)
+        } else {
+          if (!is.numeric(plot_df$value)) {
+            ggplot(plot_df, aes(x = factor(value))) +
+              geom_bar(fill = "#1abc9c", color = "white") +
+              labs(title = paste("Distribution of", col_name), x = col_name, y = "Count") +
+              theme_minimal(base_size = 14)
+          } else {
+            ggplot(plot_df, aes(x = value)) +
+              geom_density(fill = "#1abc9c", alpha = 0.5, color = "#16a085") +
+              labs(title = paste("Density Plot of", col_name), x = col_name, y = "Density") +
+              theme_minimal(base_size = 14)
+          }
         }
       }
     )
+
 
     print(p)
   })
@@ -534,7 +569,9 @@ server <- function(input, output, session) {
     req(input$generate_graph)
 
     viz <- viz_data()
-    values <- viz$values[!is.na(viz$values)]
+    values <- viz$plot_df$value
+    values <- values[!is.na(values)]
+
 
     if (!is.numeric(values)) {
       data.frame(
@@ -563,11 +600,21 @@ server <- function(input, output, session) {
     req(input$generate_graph)
 
     viz <- viz_data()
-    interpretation <- generate_interpretation(viz$col_name, viz$values)
+    interpretation <- generate_interpretation(viz$col_name, viz$plot_df$value)
     HTML(paste("<strong>Interpretation:</strong>", interpretation))
   })
 
-  # --- Correlation Heatmap ---
+  # --- Smart Graph Suggester ---
+  observeEvent(input$selected_column, {
+    var_name <- input$selected_column
+    # Suggest Histogram for continuous, Bar Chart for categorical
+    if (var_name %in% c("age", "sysBP", "totChol", "glucose", "BMI", "cigsPerDay")) {
+      updateSelectInput(session, "graph_type", selected = "histogram")
+    } else {
+      updateSelectInput(session, "graph_type", selected = "barchart")
+    }
+  })
+
   cor_data <- eventReactive(input$show_correlation, {
     num_data <- data[, numeric_cols, drop = FALSE]
     num_data <- na.omit(num_data)
@@ -648,7 +695,17 @@ server <- function(input, output, session) {
     list(probability = probability, risk_info = risk_info)
   }, ignoreNULL = FALSE)
 
+  output$prediction_display_panel <- renderUI({
+    req(input$predict_risk)
+    wellPanel(
+      style = "border-left: 5px solid #e74c3c; background-color: #fcfcfc;",
+      h4("Individual Health Assessment"),
+      uiOutput("prediction_result")
+    )
+  })
+
   output$prediction_result <- renderUI({
+
     req(input$predict_risk)
 
     result <- prediction_result()
