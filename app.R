@@ -16,13 +16,26 @@ raw_data <- read.csv("framingham.csv", stringsAsFactors = FALSE, na.strings = c(
 
 # Convert all columns to appropriate types for analysis
 data <- raw_data
+model_features <- c("age", "male", "sysBP", "totChol", "glucose", "cigsPerDay", "prevalentStroke", "prevalentHyp")
+# We keep BMI for visualization purposes but exclude it from the predictive model features
+viz_features <- c(model_features, "BMI")
 
-model_features <- c("age", "male", "sysBP", "totChol", "glucose", "BMI", "cigsPerDay", "diabetes", "prevalentStroke", "prevalentHyp")
+
+
+# Explicit Type Conversion to prevent 0.0 scaling issues
+data[model_features] <- lapply(data[model_features], function(x) as.numeric(as.character(x)))
+
 model_data <- data %>%
-  dplyr::select(all_of(c(model_features, "TenYearCHD"))) %>%
+  dplyr::select(all_of(c(model_features, "BMI", "TenYearCHD"))) %>%
   na.omit()
 
+
+
+
+
 continuous_vars <- c("sysBP", "totChol", "glucose", "BMI")
+
+
 for(v in continuous_vars) {
   limit <- quantile(model_data[[v]], 0.99, na.rm = TRUE)
   model_data <- model_data[model_data[[v]] <= limit, ]
@@ -39,11 +52,13 @@ train_data <- model_data[train_idx, ]
 test_data <- model_data[-train_idx, ]
 
 logistic_model <- glm(
-  TenYearCHD ~ age + male + sysBP + totChol + glucose + BMI + cigsPerDay + diabetes + prevalentStroke + prevalentHyp,
+  TenYearCHD ~ age + male + sysBP + totChol + glucose + cigsPerDay + prevalentStroke + prevalentHyp,
+
   data = train_data,
   weights = weights_orig[train_idx],
   family = "binomial"
 )
+
 
 predicted_probs_test <- predict(logistic_model, newdata = test_data, type = "response")
 predicted_classes_test <- ifelse(predicted_probs_test > 0.5, 1, 0)
@@ -65,7 +80,10 @@ specificity <- tn / (tn + fp)
 
 
 # --- Prepare K-Means Clustering Data ---
-cluster_vars <- c("age", "male", "sysBP", "totChol", "glucose", "BMI", "cigsPerDay", "diabetes", "prevalentStroke", "prevalentHyp")
+cluster_vars <- c("age", "male", "sysBP", "totChol", "glucose", "BMI", "cigsPerDay", "prevalentStroke", "prevalentHyp")
+
+
+
 cluster_data <- model_data[, cluster_vars]
 
 
@@ -194,9 +212,13 @@ ui <- fluidPage(
               "Select Indicator Groups:",
               choices = list(
                 Demographics = c("Age" = "age", "Gender" = "male"),
-                Lifestyle = c("Cigarettes Per Day" = "cigsPerDay", "BMI" = "BMI"),
+                Lifestyle = c("Cigarettes Per Day" = "cigsPerDay"),
                 `Vital Signs` = c("Systolic BP" = "sysBP", "Total Cholesterol" = "totChol", "Glucose" = "glucose"),
-                `Medical History` = c("Diabetes" = "diabetes", "Prevalent Stroke" = "prevalentStroke", "Prevalent Hyp" = "prevalentHyp")
+
+
+
+                `Medical History` = c("Prevalent Stroke" = "prevalentStroke", "Prevalent Hyp" = "prevalentHyp")
+
               ),
               selected = "age"
             ),
@@ -254,14 +276,17 @@ ui <- fluidPage(
             h4("Patient Information"),
             selectInput("input_male", "Gender:", choices = c("Male" = 1, "Female" = 0)),
             numericInput("input_age", "Age (years):", value = 50, min = 20, max = 90),
-            numericInput("input_totchol", "Total Cholesterol (mg/dL):", value = 200, min = 100, max = 600),
-            numericInput("input_sysbp", "Systolic Blood Pressure (mmHg):", value = 120, min = 80, max = 250),
-            numericInput("input_bmi", "BMI:", value = 25, min = 15, max = 50, step = 0.1),
-            numericInput("input_glucose", "Glucose (mg/dL):", value = 85, min = 40, max = 400),
-            numericInput("input_cigs", "Cigarettes Per Day:", value = 0, min = 0, max = 100),
-            selectInput("input_diabetes", "Diabetes:", choices = c("No" = 0, "Yes" = 1)),
+            numericInput("input_totchol", "Total Cholesterol (mg/dL):", value = 200, min = 100, max = 600, step = 1),
+            numericInput("input_sysbp", "Systolic Blood Pressure (mmHg):", value = 120, min = 80, max = 250, step = 1),
+            numericInput("input_glucose", "Glucose (mg/dL):", value = 85, min = 40, max = 400, step = 1),
+
+
+
+            numericInput("input_cigs", "Cigarettes Per Day:", value = 0, min = 0, max = 100, step = 1),
+
             selectInput("input_stroke", "Prevalent Stroke:", choices = c("No" = 0, "Yes" = 1)),
             selectInput("input_hyp", "Prevalent Hypertension:", choices = c("No" = 0, "Yes" = 1)),
+
 
             br(),
             actionButton("predict_risk", "Predict Risk", class = "btn-danger btn-lg", width = "100%")
@@ -274,7 +299,9 @@ ui <- fluidPage(
           wellPanel(
             h4("Analysis Metadata"),
 
-            p("Regression Baseline: TenYearCHD ~ age + male + sysBP + totChol + glucose + BMI + cigsPerDay + diabetes + prevalentStroke + prevalentHyp"),
+            p("Regression Baseline: TenYearCHD ~ age + male + sysBP + totChol + glucose + cigsPerDay + prevalentStroke + prevalentHyp"),
+
+
             actionButton("toggle_summary", "View Detailed Statistics", class = "btn-info btn-xs"),
             conditionalPanel(
               condition = "input.toggle_summary % 2 == 1",
@@ -411,8 +438,8 @@ server <- function(input, output, session) {
       sysBP = "Systolic blood pressure is a primary indicator of vascular stress and hypertension.",
       totChol = "Total cholesterol levels often serve as a gauge for atherosclerosis risk.",
       BMI = "BMI provides an estimate of body weight status; higher values linked to heart strain.",
-      glucose = "Managing blood glucose is essential for reducing diabetes-related cardiac complications.",
-      diabetes = "A diagnosis of diabetes significantly influences long-term cardiovascular outcomes.",
+      glucose = "Managing blood glucose is essential for reducing metabolic cardiac complications.",
+
       cigsPerDay = "The frequency of smoking directly impacts the extent of physiological strain on the heart.",
       prevalentStroke = "A clinical history of stroke indicates a very high baseline risk for future cardiac events.",
       prevalentHyp = "Chronic hypertension shows long-term damage and elevations in risk levels.",
@@ -679,13 +706,13 @@ server <- function(input, output, session) {
       male = as.numeric(input$input_male),
       sysBP = input$input_sysbp,
       totChol = input$input_totchol,
-      BMI = input$input_bmi,
       glucose = input$input_glucose,
+
       cigsPerDay = input$input_cigs,
-      diabetes = as.numeric(input$input_diabetes),
       prevalentStroke = as.numeric(input$input_stroke),
       prevalentHyp = as.numeric(input$input_hyp)
     )
+
 
 
 
@@ -789,12 +816,12 @@ server <- function(input, output, session) {
         "Systolic BP",
         "Total Cholesterol",
         "Glucose",
-        "BMI",
         "Cigarettes Per Day",
-        "Diabetes",
         "Prevalent Stroke",
         "Prevalent Hyp"
       ),
+
+
 
 
       Raw_Coefficient = coefs,
@@ -805,8 +832,12 @@ server <- function(input, output, session) {
 
     factors <- factors[order(-factors$Importance), ]
     factors$Rank <- seq_len(nrow(factors))
-    factors[, c("Raw_Coefficient", "Importance")] <- round(factors[, c("Raw_Coefficient", "Importance")], 4)
+    # Extreme precision (8 decimal places) to handle low-coefficient variables like BMI
+    factors$Raw_Coefficient <- round(as.numeric(factors$Raw_Coefficient), 8)
+    factors$Importance <- round(as.numeric(factors$Importance), 8)
     factors
+
+
   })
 
   output$risk_factors_table <- renderTable({
